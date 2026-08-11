@@ -31,9 +31,7 @@ class TestGitBranchState:
     def test_current_branch_in_temp_repo(self, temp_git_repo: Path) -> None:
         """Test the temporary repository reports the expected current branch."""
         os.chdir(temp_git_repo)
-        subprocess.run(
-            ["git", "checkout", "-b", "test-branch"], check=True, capture_output=True
-        )
+        subprocess.run(["git", "checkout", "-b", "test-branch"], check=True, capture_output=True)
 
         branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -269,8 +267,7 @@ class TestEnsureReleaseTag:
         assert result is False
         logged_messages = [call.args[0] for call in mock_log_error.call_args_list]
         assert any(
-            "Local tag 1.2.3 points to other456, expected head123" in msg
-            for msg in logged_messages
+            "Local tag 1.2.3 points to other456, expected head123" in msg for msg in logged_messages
         )
 
     @patch("execute_release.get_remote_tag_target")
@@ -355,9 +352,7 @@ class TestCheckTrackExists:
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stdout = ""
-        mock_result.stderr = (
-            "Release repository has no tracks nor an old style bloom.conf file."
-        )
+        mock_result.stderr = "Release repository has no tracks nor an old style bloom.conf file."
         mock_run.return_value = mock_result
 
         result = check_track_exists(
@@ -411,7 +406,7 @@ class TestRunBloomRelease:
 
         assert result == "https://github.com/ros/rosdistro/pull/123"
         assert len(mock_run.call_args_list) == 2
-        assert any("bloom-release" in str(call) for call in mock_run.call_args_list)
+        assert all(call_obj[0][0][0] == "bloom-release" for call_obj in mock_run.call_args_list)
 
     @patch("execute_release.run_command")
     def test_run_bloom_release_passes_release_repo(self, mock_run) -> None:
@@ -433,9 +428,7 @@ class TestRunBloomRelease:
             package_names=["test_package"],
         )
 
-        bloom_calls = [
-            call for call in mock_run.call_args_list if "bloom-release" in str(call)
-        ]
+        bloom_calls = [call for call in mock_run.call_args_list if "--rosdistro" in str(call)]
         assert len(bloom_calls) > 0
         for call_obj in bloom_calls:
             args = call_obj[0][0] if call_obj[0] else []
@@ -462,9 +455,7 @@ class TestRunBloomRelease:
             package_names=["test_package"],
         )
 
-        bloom_calls = [
-            call for call in mock_run.call_args_list if "bloom-release" in str(call)
-        ]
+        bloom_calls = [call for call in mock_run.call_args_list if "--rosdistro" in str(call)]
         assert len(bloom_calls) > 0
         for call_obj in bloom_calls:
             args = call_obj[0][0] if call_obj[0] else []
@@ -490,9 +481,7 @@ class TestRunBloomRelease:
             package_names=["test_package"],
         )
 
-        bloom_calls = [
-            call for call in mock_run.call_args_list if "bloom-release" in str(call)
-        ]
+        bloom_calls = [call for call in mock_run.call_args_list if "--rosdistro" in str(call)]
         assert len(bloom_calls) > 0
         for call_obj in bloom_calls:
             args = call_obj[0][0] if call_obj[0] else []
@@ -519,13 +508,10 @@ class TestRunBloomRelease:
             new_track=True,
         )
 
-        bloom_calls = [
-            call for call in mock_run.call_args_list if "bloom-release" in str(call)
-        ]
+        bloom_calls = [call for call in mock_run.call_args_list if "--rosdistro" in str(call)]
         assert len(bloom_calls) > 0
         found_new_track = any(
-            "--new-track" in (call_obj[0][0] if call_obj[0] else [])
-            for call_obj in bloom_calls
+            "--new-track" in (call_obj[0][0] if call_obj[0] else []) for call_obj in bloom_calls
         )
         assert found_new_track
 
@@ -675,9 +661,7 @@ class TestRunBloomRelease:
 
     @patch("execute_release.log_error")
     @patch("execute_release.run_command")
-    def test_run_bloom_release_logs_pr_phase_without_url(
-        self, mock_run, mock_log_error
-    ) -> None:
+    def test_run_bloom_release_logs_pr_phase_without_url(self, mock_run, mock_log_error) -> None:
         """Test missing PR URLs in the PR-only phase are logged as errors."""
         release_result = MagicMock(returncode=0, stdout="release ok", stderr="")
         pr_result = MagicMock(returncode=0, stdout="no pr here", stderr="")
@@ -695,8 +679,7 @@ class TestRunBloomRelease:
         assert result is None
         logged_messages = [call.args[0] for call in mock_log_error.call_args_list]
         assert any(
-            "completed without producing a rosdistro PR URL" in msg
-            for msg in logged_messages
+            "completed without producing a rosdistro PR URL" in msg for msg in logged_messages
         )
 
 
@@ -748,9 +731,7 @@ class TestReleaseNoOp:
         """Helper: add a file and commit with the given message."""
         (repo / filename).write_text(message)
         subprocess.run(["git", "add", filename], check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", message], check=True, capture_output=True
-        )
+        subprocess.run(["git", "commit", "-m", message], check=True, capture_output=True)
 
     def test_non_release_commit_is_no_op(
         self, temp_git_repo: Path, package_xml_content: str

@@ -16,14 +16,11 @@ dev = [
     "mypy>=1.8.0",
 ]
 action = [
-    "bloom",
+    "bloom==0.14.3",
     "empy",
     "lark",
     "rosdep",
     "rosinstall-generator",
-    # bloom 0.13 still imports pkg_resources; remove this pin once bloom > 0.13
-    # is released without that dependency.
-    "setuptools<81",
     "vcs2l",
 ]
 

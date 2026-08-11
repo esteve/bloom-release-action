@@ -123,9 +123,7 @@ def ensure_release_tag(tag: str) -> bool:
     Returns:
         True if the tag exists remotely and points at ``HEAD``, False otherwise.
     """
-    head_result = run_command(
-        ["git", "rev-parse", "HEAD"], capture_output=True, check=False
-    )
+    head_result = run_command(["git", "rev-parse", "HEAD"], capture_output=True, check=False)
     head_commit = head_result.stdout.strip()
     if head_result.returncode != 0 or not head_commit:
         log_error("Failed to determine HEAD commit for tag verification")
@@ -152,9 +150,7 @@ def ensure_release_tag(tag: str) -> bool:
             if local_target is None:
                 log_error(f"Could not resolve local tag {tag} after creation failure")
             else:
-                log_error(
-                    f"Local tag {tag} points to {local_target}, expected {head_commit}"
-                )
+                log_error(f"Local tag {tag} points to {local_target}, expected {head_commit}")
             return False
 
     push_result = run_command(
@@ -176,9 +172,7 @@ def ensure_release_tag(tag: str) -> bool:
         if remote_target is None:
             log_error(f"Could not resolve remote tag {tag} after push failure")
         else:
-            log_error(
-                f"Remote tag {tag} points to {remote_target}, expected {head_commit}"
-            )
+            log_error(f"Remote tag {tag} points to {remote_target}, expected {head_commit}")
         return False
 
     return True
@@ -397,7 +391,6 @@ def run_bloom_release_phase(
             dry_run=dry_run,
             new_track=new_track,
         )
-        return True
     except subprocess.CalledProcessError as error:
         output = (error.stdout or "") + (error.stderr or "")
         if can_continue_after_release_repo_push_conflict(
@@ -411,6 +404,8 @@ def run_bloom_release_phase(
 
         log_bloom_failure(error)
         return False
+
+    return True
 
 
 def run_bloom_pr_phase(
@@ -508,7 +503,8 @@ def run_bloom_command(
 
     cmd.append(repo_name)
 
-    # Run bloom-release (non-interactive mode)
+    # Run bloom-release directly so its normal release path and configuration
+    # are identical to a human invocation.
     # Set BLOOM_SKIP_ROSDEP_UPDATE to speed up subsequent releases
     env = {"BLOOM_SKIP_ROSDEP_UPDATE": "1"}
     return run_command(cmd, capture_output=True, env=env)
@@ -571,9 +567,7 @@ def parse_track_list(output: str) -> Optional[set[str]]:
     Returns:
         The set of track names bloom reported, or None if parsing failed.
     """
-    match = re.search(
-        r"Available tracks:\s*(?:[A-Za-z_]+\()?([^\n]*\[[^\n]*\])\)?", output
-    )
+    match = re.search(r"Available tracks:\s*(?:[A-Za-z_]+\()?([^\n]*\[[^\n]*\])\)?", output)
     if match is None:
         return None
 
