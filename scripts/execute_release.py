@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Optional
 
 from common import (
@@ -28,6 +29,23 @@ from common import (
     run_command,
     set_output,
 )
+
+ANSI_ESCAPE_RE = re.compile(r"\033\[[0-9;m]*")
+BLOOM_EOF_ABORT = "Received 'EOFError', aborting."
+
+
+def _is_canonical_github_release_url(url: str) -> bool:
+    """Return whether a release URL is canonical and contains no credentials."""
+    return (
+        isinstance(url, str)
+        and re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", url)
+        is not None
+    )
+
+
+def is_bloom_eof_abort(output: str) -> bool:
+    """Return whether Bloom reported an EOF abort, regardless of exit status."""
+    return BLOOM_EOF_ABORT in ANSI_ESCAPE_RE.sub("", output)
 
 
 def get_local_tag_target(tag: str) -> Optional[str]:
@@ -305,6 +323,14 @@ def log_bloom_failure(error: subprocess.CalledProcessError) -> None:
         log_error(f"bloom-release stderr:\n{error.stderr}")
 
 
+def log_completed_bloom_failure(result: subprocess.CompletedProcess) -> None:
+    """Log output from a Bloom process that returned an unusable result."""
+    if result.stdout:
+        log_error(f"bloom-release stdout:\n{result.stdout}")
+    if result.stderr:
+        log_error(f"bloom-release stderr:\n{result.stderr}")
+
+
 def can_continue_after_release_repo_push_conflict(
     output: str,
     release_repo: str,
@@ -363,7 +389,6 @@ def run_bloom_release_phase(
     version: Optional[str],
     package_names: Optional[list[str]],
     dry_run: bool,
-    new_track: bool,
 ) -> bool:
     """Run the release-repository mutation phase of bloom-release.
 
@@ -375,24 +400,29 @@ def run_bloom_release_phase(
         version: Package version being released.
         package_names: Package names expected to have release tags.
         dry_run: Run bloom in dry-run mode.
-        new_track: Create the bloom track before releasing.
 
     Returns:
         True if the release phase succeeded or a verified push-race is safe to
         continue past, False otherwise.
     """
+    if not _is_canonical_github_release_url(release_repo):
+        log_error("Bloom release refused: release repository URL is not canonical")
+        return False
     try:
-        run_bloom_command(
+        result = run_bloom_command(
             repo_name=repo_name,
             rosdistro=rosdistro,
             track=track,
             release_repo=release_repo,
             no_pull_request=True,
             dry_run=dry_run,
-            new_track=new_track,
         )
     except subprocess.CalledProcessError as error:
         output = (error.stdout or "") + (error.stderr or "")
+        if is_bloom_eof_abort(output):
+            log_error("Bloom release emitted an EOF abort; release failed")
+            log_bloom_failure(error)
+            return False
         if can_continue_after_release_repo_push_conflict(
             output=output,
             release_repo=release_repo,
@@ -405,6 +435,23 @@ def run_bloom_release_phase(
         log_bloom_failure(error)
         return False
 
+    output = (result.stdout or "") + (result.stderr or "")
+    if can_continue_after_release_repo_push_conflict(
+        output=output,
+        release_repo=release_repo,
+        track=track,
+        version=version,
+        package_names=package_names,
+    ):
+        return True
+    if result.returncode != 0:
+        log_error("Bloom release phase exited unsuccessfully")
+        log_completed_bloom_failure(result)
+        return False
+    if result.returncode == 0 and is_bloom_eof_abort(output):
+        log_error("Bloom release emitted an EOF abort; release failed")
+        log_completed_bloom_failure(result)
+        return False
     return True
 
 
@@ -427,6 +474,9 @@ def run_bloom_pr_phase(
     Returns:
         The rosdistro PR URL if successful, otherwise None.
     """
+    if not _is_canonical_github_release_url(release_repo):
+        log_error("Bloom pull-request refused: release repository URL is not canonical")
+        return None
     try:
         pr_result = run_bloom_command(
             repo_name=repo_name,
@@ -437,10 +487,20 @@ def run_bloom_pr_phase(
             dry_run=dry_run,
         )
     except subprocess.CalledProcessError as error:
+        if is_bloom_eof_abort((error.stdout or "") + (error.stderr or "")):
+            log_error("Bloom pull-request phase emitted an EOF abort")
         log_bloom_failure(error)
         return None
 
-    output = pr_result.stdout + pr_result.stderr
+    output = (pr_result.stdout or "") + (pr_result.stderr or "")
+    if pr_result.returncode != 0:
+        log_error("Bloom pull-request phase exited unsuccessfully")
+        log_completed_bloom_failure(pr_result)
+        return None
+    if pr_result.returncode == 0 and is_bloom_eof_abort(output):
+        log_error("Bloom pull-request phase emitted an EOF abort")
+        log_completed_bloom_failure(pr_result)
+        return None
     pr_url = extract_rosdistro_pr_url(output)
     if pr_url:
         return pr_url
@@ -461,7 +521,6 @@ def run_bloom_command(
     no_pull_request: bool = False,
     pull_request_only: bool = False,
     dry_run: bool = False,
-    new_track: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run bloom-release with the requested execution mode.
 
@@ -473,7 +532,6 @@ def run_bloom_command(
         no_pull_request: Skip opening a rosdistro PR after release actions.
         pull_request_only: Skip release actions and only open a rosdistro PR.
         dry_run: Run bloom in dry-run mode.
-        new_track: Create the bloom track before releasing.
 
     Returns:
         Completed process for the bloom invocation.
@@ -486,9 +544,6 @@ def run_bloom_command(
         track,
         "--non-interactive",
     ]
-
-    if new_track:
-        cmd.append("--new-track")
 
     if no_pull_request:
         cmd.append("--no-pull-request")
@@ -503,11 +558,14 @@ def run_bloom_command(
 
     cmd.append(repo_name)
 
-    # Run bloom-release directly so its normal release path and configuration
-    # are identical to a human invocation.
-    # Set BLOOM_SKIP_ROSDEP_UPDATE to speed up subsequent releases
+    # Run the Bloom-native launcher so Bloom owns the complete release path.
+    launcher = Path(__file__).with_name("bloom_release.py")
     env = {"BLOOM_SKIP_ROSDEP_UPDATE": "1"}
-    return run_command(cmd, capture_output=True, env=env)
+    return run_command(
+        [sys.executable, str(launcher), *cmd[1:]],
+        capture_output=True,
+        env=env,
+    )
 
 
 def run_bloom_release(
@@ -518,7 +576,6 @@ def run_bloom_release(
     version: Optional[str] = None,
     package_names: Optional[list[str]] = None,
     dry_run: bool = False,
-    new_track: bool = False,
 ) -> Optional[str]:
     """Run bloom release actions and then open the rosdistro pull request.
 
@@ -530,7 +587,6 @@ def run_bloom_release(
         version: Package version being released.
         package_names: Package names expected to have release tags.
         dry_run: Run bloom in dry-run mode.
-        new_track: Create the bloom track before releasing.
 
     Returns:
         The rosdistro PR URL if successful, otherwise None.
@@ -545,7 +601,6 @@ def run_bloom_release(
         version=version,
         package_names=package_names,
         dry_run=dry_run,
-        new_track=new_track,
     ):
         return None
 
@@ -603,6 +658,9 @@ def check_track_exists(
         True if the track exists, False if it definitely does not exist, or
         None if the probe was inconclusive.
     """
+    if not _is_canonical_github_release_url(release_repo):
+        log_error("Bloom track probe refused: release repository URL is not canonical")
+        return None
     try:
         result = run_command(
             [
@@ -675,7 +733,6 @@ def main() -> None:
     log_info(f"Repository: {args.repository}")
     log_info(f"ROS Distribution: {args.rosdistro}")
     log_info(f"Track: {args.track}")
-    log_info(f"Release repository: {args.release_repository}")
 
     # Note: Changelog generation is done in prepare_release.py
     # This script only creates git tags and runs bloom-release
@@ -699,6 +756,46 @@ def main() -> None:
     package_names = get_package_names(exclude_paths)
     log_info(f"Releasing version: {version}")
 
+    if not _is_canonical_github_release_url(args.release_repository):
+        log_error("Release repository URL is not canonical; release aborted")
+        set_output("released", "false")
+        set_output("version", version)
+        set_output("rosdistro", args.rosdistro)
+        sys.exit(1)
+    log_info(f"Release repository: {args.release_repository}")
+
+    # Dry-run must not create a source tag, probe or update the release repo, or
+    # invoke Bloom. Keep this guard before every mutating operation.
+    if args.dry_run:
+        log_warning("Dry-run mode enabled, skipping actual release")
+        set_output("released", "false")
+        set_output("version", version)
+        set_output("rosdistro", args.rosdistro)
+        return
+
+    # New tracks cannot be safely initialized by non-interactive Bloom. Refuse
+    # before creating or pushing the source tag.
+    track_exists = check_track_exists(
+        repo_name=args.repository,
+        rosdistro=args.rosdistro,
+        track=args.track,
+        release_repo=args.release_repository,
+    )
+    if track_exists is False:
+        log_error(
+            f"Release track '{args.track}' is absent; initialize it manually "
+            "with git-bloom-config before rerunning the release"
+        )
+        set_output("released", "false")
+        set_output("version", version)
+        set_output("rosdistro", args.rosdistro)
+        sys.exit(1)
+    if track_exists is None:
+        log_warning(
+            f"Could not determine whether track '{args.track}' exists; "
+            "continuing without new-track initialization"
+        )
+
     # Optimistic tag creation: in a parallel matrix another job may create the
     # same annotated tag first. Treat that as success only when the tag resolves
     # to this job's HEAD commit.
@@ -708,30 +805,6 @@ def main() -> None:
         set_output("rosdistro", args.rosdistro)
         sys.exit(1)
 
-    # Check if this is a new track
-    track_exists = check_track_exists(
-        repo_name=args.repository,
-        rosdistro=args.rosdistro,
-        track=args.track,
-        release_repo=args.release_repository,
-    )
-    new_track = track_exists is False
-    if new_track:
-        log_info(f"Track '{args.track}' does not exist, will create new track")
-    elif track_exists is None:
-        log_warning(
-            f"Could not determine whether track '{args.track}' exists; "
-            "running bloom-release without --new-track"
-        )
-
-    # Run bloom-release
-    if args.dry_run:
-        log_warning("Dry-run mode enabled, skipping actual release")
-        set_output("released", "false")
-        set_output("version", version)
-        set_output("rosdistro", args.rosdistro)
-        return
-
     pr_url = run_bloom_release(
         repo_name=args.repository,
         rosdistro=args.rosdistro,
@@ -740,7 +813,6 @@ def main() -> None:
         version=version,
         package_names=package_names,
         dry_run=args.dry_run,
-        new_track=new_track,
     )
 
     if pr_url:

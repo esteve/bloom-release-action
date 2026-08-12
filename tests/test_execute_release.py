@@ -1,10 +1,13 @@
 """Tests for execute_release.py script."""
 
+import argparse
 import os
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
@@ -17,11 +20,15 @@ from execute_release import (
     get_local_tag_target,
     get_package_names,
     get_remote_tag_target,
+    is_bloom_eof_abort,
     is_release_repo_push_conflict,
+    main,
     parse_remote_tag_target,
     parse_track_list,
     release_repo_has_expected_release_tags,
     run_bloom_release,
+    run_bloom_pr_phase,
+    run_bloom_release_phase,
 )
 
 
@@ -406,7 +413,11 @@ class TestRunBloomRelease:
 
         assert result == "https://github.com/ros/rosdistro/pull/123"
         assert len(mock_run.call_args_list) == 2
-        assert all(call_obj[0][0][0] == "bloom-release" for call_obj in mock_run.call_args_list)
+        assert all(
+            call_obj[0][0][0] == sys.executable
+            and Path(call_obj[0][0][1]).name == "bloom_release.py"
+            for call_obj in mock_run.call_args_list
+        )
 
     @patch("execute_release.run_command")
     def test_run_bloom_release_passes_release_repo(self, mock_run) -> None:
@@ -460,60 +471,6 @@ class TestRunBloomRelease:
         for call_obj in bloom_calls:
             args = call_obj[0][0] if call_obj[0] else []
             assert "--non-interactive" in args
-
-    @patch("execute_release.run_command")
-    def test_run_bloom_release_no_new_track_by_default(self, mock_run) -> None:
-        """Test that --new-track is not passed when new_track=False (default)."""
-        release_result = MagicMock(returncode=0, stdout="release ok", stderr="")
-        pr_result = MagicMock(
-            returncode=0,
-            stdout="https://github.com/ros/rosdistro/pull/123\n",
-            stderr="",
-        )
-        mock_run.side_effect = [release_result, pr_result]
-
-        run_bloom_release(
-            repo_name="test_package",
-            rosdistro="rolling",
-            track="rolling",
-            release_repo="https://github.com/ros2-gbp/test_package-release.git",
-            version="1.2.3",
-            package_names=["test_package"],
-        )
-
-        bloom_calls = [call for call in mock_run.call_args_list if "--rosdistro" in str(call)]
-        assert len(bloom_calls) > 0
-        for call_obj in bloom_calls:
-            args = call_obj[0][0] if call_obj[0] else []
-            assert "--new-track" not in args
-
-    @patch("execute_release.run_command")
-    def test_run_bloom_release_new_track(self, mock_run) -> None:
-        """Test that --new-track is passed when new_track=True."""
-        release_result = MagicMock(returncode=0, stdout="release ok", stderr="")
-        pr_result = MagicMock(
-            returncode=0,
-            stdout="https://github.com/ros/rosdistro/pull/123\n",
-            stderr="",
-        )
-        mock_run.side_effect = [release_result, pr_result]
-
-        run_bloom_release(
-            repo_name="test_package",
-            rosdistro="rolling",
-            track="rolling",
-            release_repo="https://github.com/ros2-gbp/test_package-release.git",
-            version="1.2.3",
-            package_names=["test_package"],
-            new_track=True,
-        )
-
-        bloom_calls = [call for call in mock_run.call_args_list if "--rosdistro" in str(call)]
-        assert len(bloom_calls) > 0
-        found_new_track = any(
-            "--new-track" in (call_obj[0][0] if call_obj[0] else []) for call_obj in bloom_calls
-        )
-        assert found_new_track
 
     @patch("execute_release.run_command")
     def test_run_bloom_release_splits_release_and_pr_flags(self, mock_run) -> None:
@@ -681,6 +638,144 @@ class TestRunBloomRelease:
         assert any(
             "completed without producing a rosdistro PR URL" in msg for msg in logged_messages
         )
+
+
+class TestBloomEofAbort:
+    """Tests for successful Bloom commands that contain an EOF abort."""
+
+    @patch("execute_release.release_repo_has_expected_release_tags")
+    @patch("execute_release.run_command")
+    def test_zero_exit_push_conflict_eof_converges_before_eof_rejection(
+        self, mock_run, mock_verify_release_repo
+    ) -> None:
+        """A verified push race remains successful despite Bloom's EOF output."""
+        release_result = MagicMock(
+            returncode=0,
+            stdout=(
+                "error: failed to push some refs to "
+                "'https://github.com/test/repo.git'\n"
+                "! [rejected] master -> master (fetch first)\n"
+                "Pushing changes failed, would you like to add '--force' to "
+                "'git push --all'?\n"
+                "Received 'EOFError', aborting.\n"
+            ),
+            stderr="",
+        )
+        pr_result = MagicMock(
+            returncode=0,
+            stdout="https://github.com/ros/rosdistro/pull/123\n",
+            stderr="",
+        )
+        mock_run.side_effect = [release_result, pr_result]
+        mock_verify_release_repo.return_value = True
+
+        result = run_bloom_release(
+            repo_name="test_package",
+            rosdistro="rolling",
+            track="rolling",
+            release_repo="https://github.com/test/repo-release.git",
+            version="1.2.3",
+            package_names=["test_package"],
+        )
+
+        assert result == "https://github.com/ros/rosdistro/pull/123"
+        assert mock_verify_release_repo.called
+        assert mock_run.call_count == 2
+
+    @patch("execute_release.run_command")
+    def test_release_phase_rejects_eof_on_success(self, mock_run) -> None:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="release output\nReceived 'EOFError', aborting.\n",
+            stderr="",
+        )
+
+        assert (
+            run_bloom_release_phase(
+                "test_package",
+                "rolling",
+                "rolling",
+                "https://github.com/test/repo.git",
+                "1.2.3",
+                ["test_package"],
+                False,
+            )
+            is False
+        )
+
+    @patch("execute_release.run_command")
+    def test_pr_phase_rejects_eof_on_success(self, mock_run) -> None:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="Received 'EOFError', aborting.",
+            stderr="",
+        )
+
+        assert (
+            run_bloom_pr_phase(
+                "test_package",
+                "rolling",
+                "rolling",
+                "https://github.com/test/repo.git",
+                False,
+            )
+            is None
+        )
+
+    def test_eof_detector_strips_ansi_sequences(self) -> None:
+        assert is_bloom_eof_abort("\033[31mReceived 'EOFError', aborting.\033[0m")
+
+
+class TestNewTrackSafety:
+    """New tracks fail before the source tag is created."""
+
+    def test_absent_track_fails_before_tag_or_bloom(self) -> None:
+        args = argparse.Namespace(
+            repository="test_package",
+            rosdistro="rolling",
+            track="rolling",
+            release_repository="https://github.com/test/repo-release.git",
+            dry_run=False,
+        )
+        with (
+            patch("execute_release.parse_args", return_value=args),
+            patch("execute_release.is_release_commit", return_value=True),
+            patch("execute_release.get_exclude_paths_from_env", return_value=[]),
+            patch("execute_release.get_package_version", return_value="1.2.3"),
+            patch("execute_release.get_package_names", return_value=["test_package"]),
+            patch("execute_release.check_track_exists", return_value=False),
+            patch("execute_release.ensure_release_tag") as ensure_tag,
+            patch("execute_release.run_bloom_release") as bloom,
+        ):
+            with pytest.raises(SystemExit):
+                main()
+
+        ensure_tag.assert_not_called()
+        bloom.assert_not_called()
+
+    def test_dry_run_skips_track_probe_and_mutation(self) -> None:
+        args = argparse.Namespace(
+            repository="test_package",
+            rosdistro="rolling",
+            track="rolling",
+            release_repository="https://github.com/test/repo-release.git",
+            dry_run=True,
+        )
+        with (
+            patch("execute_release.parse_args", return_value=args),
+            patch("execute_release.is_release_commit", return_value=True),
+            patch("execute_release.get_exclude_paths_from_env", return_value=[]),
+            patch("execute_release.get_package_version", return_value="1.2.3"),
+            patch("execute_release.get_package_names", return_value=["test_package"]),
+            patch("execute_release.check_track_exists") as check_track,
+            patch("execute_release.ensure_release_tag") as ensure_tag,
+            patch("execute_release.run_bloom_release") as bloom,
+        ):
+            main()
+
+        check_track.assert_not_called()
+        ensure_tag.assert_not_called()
+        bloom.assert_not_called()
 
 
 class TestIntegration:

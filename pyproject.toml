@@ -70,6 +70,6 @@ default = { features = ["test", "dev", "action"] }
 test = "pytest --no-cov -q"
 format-check = "black --check scripts/ tests/"
 lint = "ruff check scripts/ tests/"
-typecheck = "mypy scripts/common.py scripts/execute_release.py scripts/prepare_release.py --ignore-missing-imports"
+typecheck = "mypy scripts/bloom_release.py scripts/common.py scripts/execute_release.py scripts/prepare_release.py --ignore-missing-imports"
 rosdep-init = "sudo \"$CONDA_PREFIX/bin/rosdep\" init || true"
 rosdep-update = "rosdep update"

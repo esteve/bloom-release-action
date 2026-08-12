@@ -13,10 +13,12 @@ import pytest
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
     """Create a temporary directory for testing."""
+    original_cwd = Path.cwd()
     tmpdir = tempfile.mkdtemp()
     try:
         yield Path(tmpdir)
     finally:
+        os.chdir(original_cwd)
         shutil.rmtree(tmpdir)
 
 
@@ -25,9 +27,7 @@ def temp_git_repo(temp_dir: Path) -> Path:
     """Create a temporary git repository with initial commit."""
     os.chdir(temp_dir)
     subprocess.run(["git", "init"], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test User"], check=True, capture_output=True
-    )
+    subprocess.run(["git", "config", "user.name", "Test User"], check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         check=True,
@@ -37,9 +37,7 @@ def temp_git_repo(temp_dir: Path) -> Path:
     # Create initial commit
     (temp_dir / "README.md").write_text("# Test Repository\n")
     subprocess.run(["git", "add", "README.md"], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Initial commit"], check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "Initial commit"], check=True, capture_output=True)
 
     return temp_dir
 
